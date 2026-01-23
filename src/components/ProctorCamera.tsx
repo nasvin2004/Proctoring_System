@@ -56,7 +56,7 @@ export default function ProctorCamera() {
   const isMobile =
   /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 
-  tabSwitchGraceUntilRef.current = Date.now() + 1000; // ⏱ 1 seconds grace
+  tabSwitchGraceUntilRef.current = Date.now() + 3000; // ⏱ 3 seconds grace
 
   /* ---------------- LOGGING ---------------- */
   const addLog = (type: LogItem["type"], message: string) => {
