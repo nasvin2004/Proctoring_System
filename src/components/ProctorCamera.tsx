@@ -1,4 +1,4 @@
-import { useRef, useState, useEffect } from "react";
+import { useRef, useState } from "react";
 import { loadFaceLandmarker } from "../ml/faceLandmarker";
 import { extractHeadPose } from "../ml/headPose";
 import { classifyHeadPose } from "../ml/headClassifier";
@@ -7,32 +7,198 @@ import { decideMalpractice } from "../ml/headDecision";
 import { loadObjectModel, detectObjects } from "../ml/objectDetector";
 import { useBrowserProctoring } from "../hooks/useBrowserProctoring";
 
+/* ---------------- TYPES ---------------- */
 type LogItem = {
   time: string;
   type: "error" | "warning" | "info";
   message: string;
 };
 
+type ScreenshotItem = {
+  time: string;
+  url: string;
+};
+
+type CameraShotItem = {
+  time: string;
+  reason: string;
+  url: string;
+};
+
 export default function ProctorCamera() {
-  const containerRef = useRef<HTMLDivElement>(null);
+  /* ---------------- REFS ---------------- */
   const videoRef = useRef<HTMLVideoElement>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const landmarkerRef = useRef<any>(null);
+  const cameraStreamRef = useRef<MediaStream | null>(null);
+  const screenStreamRef = useRef<MediaStream | null>(null);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const recordedChunksRef = useRef<Blob[]>([]);
   const runningRef = useRef(false);
+  const tabSwitchGraceUntilRef = useRef<number>(0);
+
+  tabSwitchGraceUntilRef.current = Date.now() + 1000; // ⏱ 1 seconds grace
+
+  /* ⏱ RANDOM CAMERA SHOT INTERVAL */
+  const randomShotIntervalRef = useRef<number | null>(null);
+
+  /* ⏱ CAMERA SCREENSHOT COOLDOWN */
+  const lastCameraShotByReasonRef = useRef<Record<string, number>>({});
+  const CAMERA_SHOT_COOLDOWN_MS = 60_000; // 1 minute
+
+  /* ⏱ RANDOM CAMERA SHOT COOLDOWN */
+  const lastRandomShotTimeRef = useRef<number>(0);
+  const RANDOM_SHOT_COOLDOWN_MS = 10_000; // 10 seconds
 
   /* ---------------- STATE ---------------- */
   const [isRunning, setIsRunning] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
-  const [loadingPercent, setLoadingPercent] = useState(0);
   const [fullscreenBlocked, setFullscreenBlocked] = useState(false);
+  const [sessionVideoUrl, setSessionVideoUrl] = useState<string | null>(null);
+  const [screenshots, setScreenshots] = useState<ScreenshotItem[]>([]);
+  const [cameraShots, setCameraShots] = useState<CameraShotItem[]>([]);
   const [logs, setLogs] = useState<LogItem[]>([]);
 
-  /* ---------------- LOG HELPER ---------------- */
+  /* ---------------- LOGGING ---------------- */
   const addLog = (type: LogItem["type"], message: string) => {
     setLogs((prev) => [
       ...prev,
       { time: new Date().toLocaleTimeString(), type, message },
     ]);
+  };
+
+  /* ---------------- RANDOM CAMERA SHOT (SEPARATE COOLDOWN) ---------------- */
+  const captureRandomShot = () => {
+    if (!videoRef.current || !videoRef.current.videoWidth) return;
+
+    const now = Date.now();
+
+    // ⛔ 30s cooldown for RANDOM shots only
+    if (now - lastRandomShotTimeRef.current < RANDOM_SHOT_COOLDOWN_MS) {
+      return;
+    }
+
+    lastRandomShotTimeRef.current = now;
+
+    const video = videoRef.current;
+    const canvas = document.createElement("canvas");
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    canvas.toBlob(
+      (blob) => {
+        if (!blob) return;
+
+        const url = URL.createObjectURL(blob);
+
+        setCameraShots((prev) => [
+          ...prev,
+          {
+            time: new Date().toLocaleTimeString(),
+            reason: "Random camera snapshot",
+            url,
+          },
+        ]);
+
+        addLog("info", "Random camera snapshot captured");
+      },
+      "image/jpeg",
+      0.7,
+    );
+  };
+
+  /* ---------------- CAMERA FRAME CAPTURE (PER-REASON COOLDOWN) ---------------- */
+  const captureCameraFrame = (reason: string) => {
+    if (!videoRef.current || !videoRef.current.videoWidth) return;
+
+    const now = Date.now();
+    const lastShotTime = lastCameraShotByReasonRef.current[reason] ?? 0;
+
+    // ⛔ Per-reason cooldown check
+    if (now - lastShotTime < CAMERA_SHOT_COOLDOWN_MS) {
+      return;
+    }
+
+    // ✅ Update last shot time for this reason
+    lastCameraShotByReasonRef.current[reason] = now;
+
+    const video = videoRef.current;
+    const canvas = document.createElement("canvas");
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    canvas.toBlob(
+      (blob) => {
+        if (!blob) return;
+
+        const url = URL.createObjectURL(blob);
+        setCameraShots((prev) => [
+          ...prev,
+          {
+            time: new Date().toLocaleTimeString(),
+            reason,
+            url,
+          },
+        ]);
+
+        addLog("warning", `Camera shot captured: ${reason}`);
+      },
+      "image/jpeg",
+      0.7,
+    );
+  };
+
+  /* ---------------- SCREENSHOT CAPTURE (TAB SWITCH) ---------------- */
+  const captureScreenshot = async () => {
+    if (!screenStreamRef.current) return;
+
+    try {
+      const video = document.createElement("video");
+      video.srcObject = screenStreamRef.current;
+      video.muted = true;
+      video.playsInline = true;
+
+      await video.play();
+
+      const canvas = document.createElement("canvas");
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+      const blob = await new Promise<Blob | null>((res) =>
+        canvas.toBlob(res, "image/png"),
+      );
+
+      video.pause();
+      video.srcObject = null;
+
+      if (!blob) return;
+
+      const url = URL.createObjectURL(blob);
+
+      setScreenshots((prev) => [
+        ...prev,
+        {
+          time: new Date().toLocaleTimeString(),
+          url,
+        },
+      ]);
+
+      addLog("warning", "Screenshot captured on tab switch");
+    } catch {
+      addLog("warning", "Failed to capture screenshot");
+    }
   };
 
   /* ---------------- BROWSER PROCTORING ---------------- */
@@ -41,294 +207,509 @@ export default function ProctorCamera() {
     fullScreenRequired: true,
     onViolation: (reason) => {
       if (reason === "fullscreen-exit") {
+        addLog("error", "Fullscreen exited during exam");
         setFullscreenBlocked(true);
-        addLog("error", "Fullscreen exited. Please re-enter fullscreen.");
       }
+
       if (reason === "tab-switch") {
-        addLog("error", "Tab switch or window focus lost");
+       if (Date.now() < tabSwitchGraceUntilRef.current) {
+    return;
+  }
+
+        addLog("error", "Tab switch / window focus lost");
+        setTimeout(() => {
+          captureScreenshot();
+        }, 1000);
       }
     },
   });
 
-  /* ---------------- VIDEO READY HELPER ---------------- */
-  const waitForVideoReady = (video: HTMLVideoElement) =>
-    new Promise<void>((resolve) => {
-      if (video.videoWidth > 0 && video.videoHeight > 0) return resolve();
-      const handler = () => {
-        if (video.videoWidth > 0 && video.videoHeight > 0) {
-          video.removeEventListener("loadeddata", handler);
-          resolve();
-        }
-      };
-      video.addEventListener("loadeddata", handler);
+  /* ---------------- SCREEN SHARE (STRICT) ---------------- */
+  const requestScreenShare = async (): Promise<MediaStream | null> => {
+    try {
+      const stream = await navigator.mediaDevices.getDisplayMedia({
+        video: { frameRate: 30 },
+        audio: true,
+      });
+
+      const track = stream.getVideoTracks()[0];
+      const settings = track.getSettings();
+
+      if (settings.displaySurface !== "monitor") {
+        stream.getTracks().forEach((t) => t.stop());
+        addLog("error", "Violation: Entire screen not shared");
+        return null;
+      }
+
+      screenStreamRef.current = stream;
+      addLog("info", "Entire screen shared successfully");
+      return stream;
+    } catch {
+      addLog("error", "Screen sharing permission denied");
+      return null;
+    }
+  };
+
+  /* ---------------- RECORDING ---------------- */
+  const startRecording = (stream: MediaStream) => {
+    recordedChunksRef.current = [];
+
+    const recorder = new MediaRecorder(stream, {
+      mimeType: "video/webm; codecs=vp9",
     });
+
+    recorder.ondataavailable = (e) => {
+      if (e.data.size > 0) recordedChunksRef.current.push(e.data);
+    };
+
+    recorder.onstop = () => {
+      const blob = new Blob(recordedChunksRef.current, {
+        type: "video/webm",
+      });
+
+      const url = URL.createObjectURL(blob);
+      setSessionVideoUrl(url);
+
+      const a = document.createElement("a");
+      a.click();
+
+      addLog("info", "Session recording saved and downloaded");
+    };
+
+    recorder.start();
+    recorderRef.current = recorder;
+    addLog("info", "Session recording started");
+  };
+
+  const stopRecording = () => {
+    recorderRef.current?.stop();
+    recorderRef.current = null;
+
+    screenStreamRef.current?.getTracks().forEach((t) => t.stop());
+    screenStreamRef.current = null;
+  };
 
   /* ---------------- CAMERA ---------------- */
   const stopCamera = () => {
-    streamRef.current?.getTracks().forEach((t) => t.stop());
-    streamRef.current = null;
+    cameraStreamRef.current?.getTracks().forEach((t) => t.stop());
+    cameraStreamRef.current = null;
     if (videoRef.current) videoRef.current.srcObject = null;
   };
 
   /* ---------------- FULLSCREEN ---------------- */
-  const enterFullscreen = async () => {
-    if (containerRef.current && !document.fullscreenElement) {
-      await containerRef.current.requestFullscreen();
-    }
-  };
-
-  const exitFullscreen = async () => {
-    if (document.fullscreenElement) await document.exitFullscreen();
-  };
-
-  useEffect(() => {
-    const onFsChange = () => {
-      if (!document.fullscreenElement && isRunning) setFullscreenBlocked(true);
-    };
-    document.addEventListener("fullscreenchange", onFsChange);
-    return () => document.removeEventListener("fullscreenchange", onFsChange);
-  }, [isRunning]);
-
-  /* ---------------- PROCTORING ---------------- */
-  const startProctoring = async () => {
-    if (runningRef.current || isLoading) return;
-
-    setLogs([]);
-    setIsLoading(true);
-    setLoadingPercent(0);
-    addLog("info", "Initializing camera & models…");
-
-    try {
-      // 1️⃣ Camera
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-      streamRef.current = stream;
-      if (!videoRef.current) return;
-      videoRef.current.srcObject = stream;
-      await waitForVideoReady(videoRef.current);
-
-      // 2️⃣ Load models with progress
-      setLoadingPercent(30);
-      landmarkerRef.current = await loadFaceLandmarker();
-
-      setLoadingPercent(70);
-      await loadObjectModel();
-
-      setLoadingPercent(100);
-      setIsLoading(false);
-
-      // 3️⃣ Enter fullscreen after models loaded
-      await enterFullscreen();
-      setFullscreenBlocked(false);
-
-      // 4️⃣ Start loop
-      runningRef.current = true;
-      setIsRunning(true);
-      addLog("info", "Proctoring started");
-
-      let faceLostAlerted = false;
-      let objectFrame = 0;
-
-      const loop = async () => {
-        if (!runningRef.current || !videoRef.current) return;
-        const video = videoRef.current;
-
-        if (video.videoWidth === 0 || video.videoHeight === 0) {
-          requestAnimationFrame(loop);
-          return;
-        }
-
-        const now = performance.now();
-        const result = landmarkerRef.current.detectForVideo(video, now);
-        const faceCount = result.faceLandmarks.length;
-
-        if (faceCount === 0) {
-          if (!faceLostAlerted) {
-            addLog("error", "Face not detected");
-            faceLostAlerted = true;
-          }
-          requestAnimationFrame(loop);
-          return;
-        }
-
-        faceLostAlerted = false;
-
-        if (faceCount > 1)
-          addLog("warning", `Multiple persons detected (${faceCount})`);
-
-        const landmarks = result.faceLandmarks[0];
-        const matrix = result.facialTransformationMatrixes[0].data;
-
-        const { yaw, pitch, roll } = extractHeadPose(matrix);
-        const head = classifyHeadPose(yaw, pitch, roll);
-        const gaze = detectGaze(landmarks);
-
-        const alert = decideMalpractice(head, gaze);
-        if (alert?.headViolation) addLog("warning", "Head deviation sustained");
-        if (alert?.gazeViolation) addLog("warning", "Gaze deviation sustained");
-
-        if (objectFrame++ % 60 === 0) {
-          const objects = await detectObjects(video);
-          objects.forEach((obj) =>
-            addLog("error", `Prohibited object detected: ${obj}`)
-          );
-        }
-
-        requestAnimationFrame(loop);
-      };
-
-      loop();
-    } catch (err) {
-      console.error(err);
-      setIsLoading(false);
-      addLog("error", "Failed to start proctoring");
-      stopProctoring();
-    }
-  };
-
-  const stopProctoring = async () => {
-    runningRef.current = false;
-    setIsRunning(false);
-    setIsLoading(false);
-    setFullscreenBlocked(false);
-    stopCamera();
-    addLog("info", "Proctoring stopped");
-    await exitFullscreen();
-  };
-
   const reEnterFullscreen = async () => {
     try {
-      await enterFullscreen();
+      await document.documentElement.requestFullscreen();
       setFullscreenBlocked(false);
       addLog("info", "Fullscreen re-entered");
     } catch {
-      addLog("warning", "Fullscreen denied");
+      addLog("warning", "Fullscreen request denied");
     }
   };
 
+  /* ---------------- START PROCTORING ---------------- */
+  const startProctoring = async () => {
+    if (runningRef.current) return;
+
+    setLogs([]);
+    setScreenshots([]);
+    setCameraShots([]);
+    setSessionVideoUrl(null);
+    setIsRunning(true);
+    runningRef.current = true;
+
+    addLog("info", "Proctoring started");
+
+    const screenStream = await requestScreenShare();
+    if (!screenStream) {
+      setIsRunning(false);
+      runningRef.current = false;
+      addLog("warning", "Exam not started. Share entire screen.");
+      return;
+    }
+
+    startRecording(screenStream);
+
+    const cameraStream = await navigator.mediaDevices.getUserMedia({
+      video: true,
+    });
+    cameraStreamRef.current = cameraStream;
+    if (videoRef.current) videoRef.current.srcObject = cameraStream;
+
+    await document.documentElement.requestFullscreen().catch(() => {
+      addLog("warning", "Fullscreen request failed initially");
+    });
+
+    const landmarker = await loadFaceLandmarker();
+    await loadObjectModel();
+
+    let faceLostAlerted = false;
+    let objectFrame = 0;
+
+    const loop = async () => {
+      if (!runningRef.current || !videoRef.current) return;
+
+      const now = performance.now();
+      const result = landmarker.detectForVideo(videoRef.current, now);
+      const faceCount = result.faceLandmarks.length;
+
+      if (faceCount === 0) {
+        if (!faceLostAlerted) {
+          addLog("error", "Face not detected");
+          captureCameraFrame("Face not detected");
+          faceLostAlerted = true;
+        }
+        requestAnimationFrame(loop);
+        return;
+      }
+
+      faceLostAlerted = false;
+
+      if (faceCount > 1) {
+        addLog("warning", `Multiple persons detected (${faceCount})`);
+        captureCameraFrame(`Multiple faces detected (${faceCount})`);
+      }
+
+      const landmarks = result.faceLandmarks[0];
+      const matrix = result.facialTransformationMatrixes?.[0]?.data;
+
+      if (matrix) {
+        const { yaw, pitch, roll } = extractHeadPose(matrix);
+        const head = classifyHeadPose(yaw, pitch, roll);
+        const gaze = detectGaze(landmarks);
+        const alert = decideMalpractice(head, gaze);
+
+        if (alert?.headViolation) {
+          addLog("warning", "Head deviation sustained");
+          captureCameraFrame("Head deviation");
+        }
+        if (alert?.gazeViolation) {
+          addLog("warning", "Gaze deviation sustained");
+          captureCameraFrame("Gaze deviation");
+        }
+      }
+
+      if (objectFrame++ % 60 === 0) {
+        const objects = await detectObjects(videoRef.current);
+        objects.forEach((obj) => {
+          addLog("error", `Prohibited object detected: ${obj}`);
+          captureCameraFrame(`Object detected: ${obj}`);
+        });
+      }
+
+      requestAnimationFrame(loop);
+    };
+
+    // 🎲 Start random camera snapshots every 30 seconds
+    randomShotIntervalRef.current = window.setInterval(() => {
+      if (!runningRef.current) return;
+      captureRandomShot();
+    }, RANDOM_SHOT_COOLDOWN_MS);
+
+    loop();
+  };
+
+  /* ---------------- STOP PROCTORING ---------------- */
+  const stopProctoring = () => {
+    // 🛑 Stop random snapshot interval
+    if (randomShotIntervalRef.current) {
+      clearInterval(randomShotIntervalRef.current);
+      randomShotIntervalRef.current = null;
+    }
+
+    runningRef.current = false;
+    setIsRunning(false);
+    stopRecording();
+    stopCamera();
+    addLog("info", "Proctoring stopped");
+  };
+
+  const randomCameraShots = cameraShots.filter(
+    (shot) => shot.reason === "Random camera snapshot",
+  );
+
+  const violationCameraShots = cameraShots.filter(
+    (shot) => shot.reason !== "Random camera snapshot",
+  );
+
   /* ---------------- UI ---------------- */
   return (
-    <div
-      ref={containerRef}
-      style={{
-        height: "100vh",
-        width: "100vw",
-        background: "#020617",
-        color: "#fff",
-        overflowY: "auto", // ✅ scrollable in fullscreen
-        padding: 16,
-      }}
-    >
-      <div style={{ maxWidth: 1100, margin: "0 auto", display: "flex", flexDirection: "column", gap: 16 }}>
-        <h2 style={{ textAlign: "center", fontWeight: 600 }}>🧠 AI Proctoring System</h2>
+    <div className="min-h-screen bg-white p-8">
+      <div className="max-w-7xl mx-auto">
+        {/* Header */}
+        <div className="mb-8">
+          <h1 className="text-3xl font-bold text-gray-900 mb-2">
+            AI Proctoring System
+          </h1>
+          <p className="text-gray-600">
+            Real-time exam monitoring with computer vision
+          </p>
+        </div>
 
-        {/* CAMERA */}
-        <div style={{ background: "#020617", padding: 12, borderRadius: 12 }}>
-          <video
-            ref={videoRef}
-            autoPlay
-            muted
-            playsInline
-            style={{ width: "100%", aspectRatio: "16 / 9", borderRadius: 10, background: "#000" }}
-          />
-
-          {/* LOADING */}
-          {isLoading && (
-            <div style={{ marginTop: 10 }}>
-              <strong>Loading models… {loadingPercent}%</strong>
-              <div style={{ height: 6, background: "#334155", borderRadius: 4, overflow: "hidden", marginTop: 4 }}>
-                <div style={{ width: `${loadingPercent}%`, height: "100%", background: "#22c55e", transition: "width 0.3s" }} />
-              </div>
+        <div className="flex w-full gap-20">
+          {/* Camera Preview */}
+          <div className="mb-8 border w-full  border-gray-300 rounded-lg overflow-hidden">
+            <div className="bg-gray-100  px-4 py-3 border-b border-gray-300">
+              <h2 className="text-lg font-semibold text-gray-900">
+                🎥 Camera Preview
+              </h2>
             </div>
-          )}
+            <div className="bg-black p-4 h-full">
+              <video
+                ref={videoRef}
+                autoPlay
+                muted
+                playsInline
+                className="w-full max-w-2xl mx-auto rounded-lg"
+              />
+            </div>
+          </div>
 
-          {/* CONTROLS */}
-          <div style={{ marginTop: 12, display: "flex", gap: 12, justifyContent: "center" }}>
-            <button
-              onClick={startProctoring}
-              disabled={isRunning || isLoading || fullscreenBlocked}
-              style={{
-                padding: "10px 18px",
-                background: isRunning || isLoading ? "#14532d" : "#22c55e",
-                borderRadius: 8,
-                fontWeight: 600,
-                minWidth: 120,
-              }}
-            >
-              ▶ Start
-            </button>
-
-            <button
-              onClick={stopProctoring}
-              disabled={!isRunning}
-              style={{
-                padding: "10px 18px",
-                background: !isRunning ? "#7f1d1d" : "#ef4444",
-                borderRadius: 8,
-                fontWeight: 600,
-                minWidth: 120,
-                color: "#fff",
-              }}
-            >
-              ⏹ Stop
-            </button>
+          {/* Violation Logs */}
+          <div className="mb-8 border w-full max-h-130 overflow-y-auto border-gray-300 rounded-lg overflow-hidden">
+            <div className="bg-gray-100  px-4 py-3 border-b border-gray-300">
+              <h2 className="text-lg font-semibold text-gray-900">
+                ⚠️ Proctoring Alerts
+              </h2>
+            </div>
+            <div className="bg-white p-4 max-h-auto overflow-y-auto">
+              {logs.length === 0 && (
+                <p className="text-gray-500 text-center py-4">
+                  No violations detected
+                </p>
+              )}
+              {logs.map((log, idx) => (
+                <div
+                  key={idx}
+                  className={`mb-2 px-3 py-2 rounded text-sm font-medium ${
+                    log.type === "error"
+                      ? "bg-red-50 text-red-700 border border-red-200"
+                      : log.type === "warning"
+                        ? "bg-yellow-50 text-yellow-700 border border-yellow-200"
+                        : "bg-blue-50 text-blue-700 border border-blue-200"
+                  }`}
+                >
+                  [{log.time}] {log.message}
+                </div>
+              ))}
+            </div>
           </div>
         </div>
 
-        {/* ALERTS */}
-        <div style={{ background: "#020617", borderRadius: 12, padding: 12, flex: 1, minHeight: 200 }}>
-          <div style={{ fontWeight: 600, marginBottom: 8 }}>⚠️ Proctoring Alerts</div>
-          <div style={{ height: "100%", overflowY: "auto", paddingRight: 6 }}>
-            {logs.length === 0 && <div style={{ color: "#94a3b8" }}>No violations detected</div>}
-            {logs.map((log, i) => (
-              <div
-                key={i}
-                style={{
-                  marginTop: 6,
-                  padding: "6px 8px",
-                  borderRadius: 6,
-                  borderLeft: log.type === "error" ? "4px solid #ef4444" : log.type === "warning" ? "4px solid #facc15" : "4px solid #38bdf8",
-                  fontSize: 13,
-                }}
-              >
-                <strong>[{log.time}]</strong> {log.message}
-              </div>
-            ))}
-          </div>
+        {/* Control Buttons */}
+        <div className="flex gap-4 mb-8">
+          <button
+            onClick={startProctoring}
+            disabled={isRunning}
+            className="px-6 py-3 bg-emerald-600 text-white font-semibold rounded-lg hover:bg-emerald-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
+          >
+            ▶ Start Proctoring
+          </button>
+          <button
+            onClick={stopProctoring}
+            disabled={!isRunning}
+            className="px-6 py-3 bg-red-600 text-white font-semibold rounded-lg hover:bg-red-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
+          >
+            ⏹ Stop Proctoring
+          </button>
         </div>
+
+        {/* Camera Violation Shots Table */}
+        {violationCameraShots.length > 0 && (
+          <div className="mb-8 border border-gray-300 rounded-lg overflow-hidden">
+            <div className="bg-gray-100 px-4 py-3 border-b border-gray-300">
+              <h2 className="text-lg font-semibold text-gray-900">
+                📷 Camera Violations
+              </h2>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-gray-300">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-900 uppercase tracking-wider">
+                      Sl No
+                    </th>
+                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-900 uppercase tracking-wider">
+                      Date & Time
+                    </th>
+                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-900 uppercase tracking-wider">
+                      Violation
+                    </th>
+                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-900 uppercase tracking-wider">
+                      Image
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="bg-white divide-y divide-gray-200">
+                  {violationCameraShots.map((shot, idx) => (
+                    <tr key={idx} className="hover:bg-gray-50">
+                      <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-900">
+                        {idx + 1}
+                      </td>
+                      <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-700">
+                        {shot.time}
+                      </td>
+                      <td className="px-4 py-3 text-sm text-gray-700">
+                        {shot.reason}
+                      </td>
+                      <td className="px-4 py-3">
+                        <img
+                          src={shot.url}
+                          alt="violation"
+                          className="w-32 h-24 object-cover rounded border border-gray-300"
+                        />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* Tab Switch Screenshots Table */}
+        {screenshots.length > 0 && (
+          <div className="mb-8 border border-gray-300 rounded-lg overflow-hidden">
+            <div className="bg-gray-100 px-4 py-3 border-b border-gray-300">
+              <h2 className="text-lg font-semibold text-gray-900">
+                📸 Tab Switch Screenshots
+              </h2>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-gray-300">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-900 uppercase tracking-wider">
+                      Sl No
+                    </th>
+                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-900 uppercase tracking-wider">
+                      Date & Time
+                    </th>
+                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-900 uppercase tracking-wider">
+                      Violation
+                    </th>
+                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-900 uppercase tracking-wider">
+                      Image
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="bg-white divide-y divide-gray-200">
+                  {screenshots.map((shot, idx) => (
+                    <tr key={idx} className="hover:bg-gray-50">
+                      <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-900">
+                        {idx + 1}
+                      </td>
+                      <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-700">
+                        {shot.time}
+                      </td>
+                      <td className="px-4 py-3 text-sm text-gray-700">
+                        Tab switch detected
+                      </td>
+                      <td className="px-4 py-3">
+                        <img
+                          src={shot.url}
+                          alt="tab switch"
+                          className="w-32 h-24 object-cover rounded border border-gray-300"
+                        />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* Random Shots Table */}
+        {randomCameraShots.length > 0 && (
+          <div className="mb-8 border border-gray-300 rounded-lg overflow-hidden">
+            <div className="bg-gray-100 px-4 py-3 border-b border-gray-300">
+              <h2 className="text-lg font-semibold text-gray-900">
+                📷 Random Shots
+              </h2>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-gray-300">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-900 uppercase tracking-wider">
+                      Sl No
+                    </th>
+                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-900 uppercase tracking-wider">
+                      Date & Time
+                    </th>
+                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-900 uppercase tracking-wider">
+                      Reason
+                    </th>
+                    <th className="px-4 py-3 text-left text-xs font-semibold text-gray-900 uppercase tracking-wider">
+                      Image
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="bg-white divide-y divide-gray-200">
+                  {randomCameraShots.map((shot, idx) => (
+                    <tr key={idx} className="hover:bg-gray-50">
+                      <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-900">
+                        {idx + 1}
+                      </td>
+                      <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-700">
+                        {shot.time}
+                      </td>
+                      <td className="px-4 py-3 text-sm text-gray-700">
+                        {shot.reason}
+                      </td>
+                      <td className="px-4 py-3">
+                        <img
+                          src={shot.url}
+                          alt="violation"
+                          className="w-32 h-24 object-cover rounded border border-gray-300"
+                        />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* Session Recording */}
+        {sessionVideoUrl && (
+          <div className="mb-8 border border-gray-300 rounded-lg overflow-hidden">
+            <div className="bg-gray-100 px-4 py-3 border-b border-gray-300">
+              <h2 className="text-lg font-semibold text-gray-900">
+                📼 Session Recording
+              </h2>
+            </div>
+            <div className="p-4 bg-white">
+              <video
+                src={sessionVideoUrl}
+                controls
+                className="w-full rounded-lg border border-gray-300"
+              />
+            </div>
+          </div>
+        )}
       </div>
 
-      {/* FULLSCREEN BLOCK */}
+      {/* Fullscreen Block Overlay */}
       {fullscreenBlocked && (
-        <div
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "rgba(0,0,0,0.85)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            zIndex: 9999,
-            flexDirection: "column",
-            textAlign: "center",
-            padding: 16,
-          }}
-        >
-          <h2 style={{ color: "#f87171", marginBottom: 12 }}>⚠ Fullscreen Required</h2>
-          <p style={{ color: "#cbd5f5", marginBottom: 16 }}>
-            You exited fullscreen. Please re-enter fullscreen to continue the exam.
-          </p>
-          <button
-            onClick={reEnterFullscreen}
-            style={{
-              padding: "10px 20px",
-              background: "#22c55e",
-              color: "#000",
-              borderRadius: 8,
-              fontWeight: 600,
-            }}
-          >
-            Re-enter Fullscreen
-          </button>
+        <div className="fixed inset-0 bg-black bg-opacity-80 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-8 max-w-md text-center shadow-2xl">
+            <div className="text-red-600 text-5xl mb-4">⚠</div>
+            <h2 className="text-2xl font-bold text-gray-900 mb-4">
+              Fullscreen Required
+            </h2>
+            <p className="text-gray-600 mb-6">
+              Please re-enter fullscreen mode to continue the exam.
+            </p>
+            <button
+              onClick={reEnterFullscreen}
+              className="px-6 py-3 bg-emerald-600 text-white font-semibold rounded-lg hover:bg-emerald-700 transition-colors"
+            >
+              Re-enter Fullscreen
+            </button>
+          </div>
         </div>
       )}
     </div>
