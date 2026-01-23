@@ -56,6 +56,8 @@ export default function ProctorCamera() {
   const isMobile =
   /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 
+  tabSwitchGraceUntilRef.current = Date.now() + 1000; // ⏱ 1 seconds grace
+
   /* ---------------- LOGGING ---------------- */
   const addLog = (type: LogItem["type"], message: string) => {
     setLogs((prev) => [
@@ -332,8 +334,6 @@ export default function ProctorCamera() {
   /* ---------------- START PROCTORING ---------------- */
   const startProctoring = async () => {
     if (runningRef.current) return;
-
-    tabSwitchGraceUntilRef.current = Date.now() + 1000; // ⏱ 1 seconds grace
 
     setLogs([]);
     setScreenshots([]);
