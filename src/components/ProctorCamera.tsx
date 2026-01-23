@@ -5,7 +5,7 @@ import { classifyHeadPose } from "../ml/headClassifier";
 import { detectGaze } from "../ml/gazeDetector";
 import { decideMalpractice } from "../ml/headDecision";
 import { loadObjectModel, detectObjects } from "../ml/objectDetector";
-import { useBrowserProctoring } from "../hooks/useBrowserProctoring";
+import { useBrowserProctoring } from "./useBrowserProctoring";
 
 /* ---------------- TYPES ---------------- */
 type LogItem = {
