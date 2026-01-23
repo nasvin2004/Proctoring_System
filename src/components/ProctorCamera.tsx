@@ -35,8 +35,6 @@ export default function ProctorCamera() {
   const runningRef = useRef(false);
   const tabSwitchGraceUntilRef = useRef<number>(0);
 
-  tabSwitchGraceUntilRef.current = Date.now() + 1000; // ⏱ 1 seconds grace
-
   /* ⏱ RANDOM CAMERA SHOT INTERVAL */
   const randomShotIntervalRef = useRef<number | null>(null);
 
@@ -55,6 +53,8 @@ export default function ProctorCamera() {
   const [screenshots, setScreenshots] = useState<ScreenshotItem[]>([]);
   const [cameraShots, setCameraShots] = useState<CameraShotItem[]>([]);
   const [logs, setLogs] = useState<LogItem[]>([]);
+  const isMobile =
+  /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 
   /* ---------------- LOGGING ---------------- */
   const addLog = (type: LogItem["type"], message: string) => {
@@ -212,9 +212,9 @@ export default function ProctorCamera() {
       }
 
       if (reason === "tab-switch") {
-       if (Date.now() < tabSwitchGraceUntilRef.current) {
-    return;
-  }
+        if (Date.now() < tabSwitchGraceUntilRef.current) {
+          return;
+        }
 
         addLog("error", "Tab switch / window focus lost");
         setTimeout(() => {
@@ -225,6 +225,31 @@ export default function ProctorCamera() {
   });
 
   /* ---------------- SCREEN SHARE (STRICT) ---------------- */
+  // const requestScreenShare = async (): Promise<MediaStream | null> => {
+  //   try {
+  //     const stream = await navigator.mediaDevices.getDisplayMedia({
+  //       video: { frameRate: 30 },
+  //       audio: true,
+  //     });
+
+  //     const track = stream.getVideoTracks()[0];
+  //     const settings = track.getSettings();
+
+  //     if (settings.displaySurface !== "monitor") {
+  //       stream.getTracks().forEach((t) => t.stop());
+  //       addLog("error", "Violation: Entire screen not shared");
+  //       return null;
+  //     }
+
+  //     screenStreamRef.current = stream;
+  //     addLog("info", "Entire screen shared successfully");
+  //     return stream;
+  //   } catch {
+  //     addLog("error", "Screen sharing permission denied");
+  //     return null;
+  //   }
+  // };
+
   const requestScreenShare = async (): Promise<MediaStream | null> => {
     try {
       const stream = await navigator.mediaDevices.getDisplayMedia({
@@ -235,17 +260,14 @@ export default function ProctorCamera() {
       const track = stream.getVideoTracks()[0];
       const settings = track.getSettings();
 
-      if (settings.displaySurface !== "monitor") {
-        stream.getTracks().forEach((t) => t.stop());
-        addLog("error", "Violation: Entire screen not shared");
-        return null;
-      }
+      // ✅ Log what user shared (no blocking)
+      addLog("info", `Screen shared: ${settings.displaySurface ?? "unknown"}`);
 
       screenStreamRef.current = stream;
-      addLog("info", "Entire screen shared successfully");
       return stream;
-    } catch {
-      addLog("error", "Screen sharing permission denied");
+    } catch (err) {
+      console.error("Screen share error:", err);
+      addLog("error", "Screen sharing permission denied or cancelled");
       return null;
     }
   };
@@ -311,6 +333,8 @@ export default function ProctorCamera() {
   const startProctoring = async () => {
     if (runningRef.current) return;
 
+    tabSwitchGraceUntilRef.current = Date.now() + 1000; // ⏱ 1 seconds grace
+
     setLogs([]);
     setScreenshots([]);
     setCameraShots([]);
@@ -320,15 +344,29 @@ export default function ProctorCamera() {
 
     addLog("info", "Proctoring started");
 
-    const screenStream = await requestScreenShare();
-    if (!screenStream) {
-      setIsRunning(false);
-      runningRef.current = false;
-      addLog("warning", "Exam not started. Share entire screen.");
-      return;
-    }
+    // const screenStream = await requestScreenShare();
+    // if (!screenStream) {
+    //   setIsRunning(false);
+    //   runningRef.current = false;
+    //   addLog("warning", "Exam not started. Share entire screen.");
+    //   return;
+    // }
 
-    startRecording(screenStream);
+    if (isMobile) {
+  addLog("warning", "Screen sharing not supported on mobile browsers");
+} else {
+  const screenStream = await requestScreenShare();
+  if (!screenStream) {
+    setIsRunning(false);
+    runningRef.current = false;
+    addLog("warning", "Exam not started. Screen sharing required.");
+    return;
+  }
+  startRecording(screenStream);
+}
+
+
+    // startRecording(screenStream);
 
     const cameraStream = await navigator.mediaDevices.getUserMedia({
       video: true,
@@ -446,7 +484,8 @@ export default function ProctorCamera() {
           </p>
         </div>
 
-        <div className="flex w-full gap-20">
+        {/* <div className="flex w-full gap-20"> */}
+        <div className="flex flex-col lg:flex-row w-full gap-6">
           {/* Camera Preview */}
           <div className="mb-8 border w-full  border-gray-300 rounded-lg overflow-hidden">
             <div className="bg-gray-100  px-4 py-3 border-b border-gray-300">
