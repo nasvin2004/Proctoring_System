@@ -54,7 +54,7 @@ export default function ProctorCamera() {
   const [cameraShots, setCameraShots] = useState<CameraShotItem[]>([]);
   const [logs, setLogs] = useState<LogItem[]>([]);
   const isMobile =
-  /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+    /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 
   tabSwitchGraceUntilRef.current = Date.now() + 1000; // ⏱ 1 seconds grace
 
@@ -353,17 +353,17 @@ export default function ProctorCamera() {
     // }
 
     if (isMobile) {
-  addLog("warning", "Screen sharing not supported on mobile browsers");
-} else {
-  const screenStream = await requestScreenShare();
-  if (!screenStream) {
-    setIsRunning(false);
-    runningRef.current = false;
-    addLog("warning", "Exam not started. Screen sharing required.");
-    return;
-  }
-  startRecording(screenStream);
-}
+      addLog("warning", "Screen sharing not supported on mobile browsers");
+    } else {
+      const screenStream = await requestScreenShare();
+      if (!screenStream) {
+        setIsRunning(false);
+        runningRef.current = false;
+        addLog("warning", "Exam not started. Screen sharing required.");
+        return;
+      }
+      startRecording(screenStream);
+    }
 
 
     // startRecording(screenStream);
@@ -378,14 +378,28 @@ export default function ProctorCamera() {
       addLog("warning", "Fullscreen request failed initially");
     });
 
+    addLog("info","Loading model....");
+
     const landmarker = await loadFaceLandmarker();
     await loadObjectModel();
 
+    addLog("info", "Model Loaded")
+
+    
     let faceLostAlerted = false;
     let objectFrame = 0;
 
     const loop = async () => {
       if (!runningRef.current || !videoRef.current) return;
+      if (
+        !videoRef.current ||
+        videoRef.current.videoWidth === 0 ||
+        videoRef.current.videoHeight === 0 ||
+        videoRef.current.readyState < 2 // HAVE_CURRENT_DATA
+      ) {
+        requestAnimationFrame(loop);
+        return;
+      }
 
       const now = performance.now();
       const result = landmarker.detectForVideo(videoRef.current, now);
@@ -520,13 +534,12 @@ export default function ProctorCamera() {
               {logs.map((log, idx) => (
                 <div
                   key={idx}
-                  className={`mb-2 px-3 py-2 rounded text-sm font-medium ${
-                    log.type === "error"
-                      ? "bg-red-50 text-red-700 border border-red-200"
-                      : log.type === "warning"
-                        ? "bg-yellow-50 text-yellow-700 border border-yellow-200"
-                        : "bg-blue-50 text-blue-700 border border-blue-200"
-                  }`}
+                  className={`mb-2 px-3 py-2 rounded text-sm font-medium ${log.type === "error"
+                    ? "bg-red-50 text-red-700 border border-red-200"
+                    : log.type === "warning"
+                      ? "bg-yellow-50 text-yellow-700 border border-yellow-200"
+                      : "bg-blue-50 text-blue-700 border border-blue-200"
+                    }`}
                 >
                   [{log.time}] {log.message}
                 </div>
