@@ -5,7 +5,7 @@ import { classifyHeadPose } from "../ml/headClassifier";
 import { detectGaze } from "../ml/gazeDetector";
 import { decideMalpractice } from "../ml/headDecision";
 import { loadObjectModel, detectObjects } from "../ml/objectDetector";
-import { useBrowserProctoring } from "../hooks/useBrowserProctoring";
+import { useBrowserProctoring } from "./useBrowserProctoring";
 
 /* ---------------- TYPES ---------------- */
 type LogItem = {
@@ -54,8 +54,8 @@ export default function ProctorCamera() {
   const [cameraShots, setCameraShots] = useState<CameraShotItem[]>([]);
   const [logs, setLogs] = useState<LogItem[]>([]);
   const isMobile =
-    /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-
+  /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+  
   tabSwitchGraceUntilRef.current = Date.now() + 1000; // ⏱ 1 seconds grace
 
   /* ---------------- LOGGING ---------------- */
@@ -275,35 +275,80 @@ export default function ProctorCamera() {
   };
 
   /* ---------------- RECORDING ---------------- */
+  // const startRecording = (stream: MediaStream) => {
+  //   recordedChunksRef.current = [];
+
+  //   const recorder = new MediaRecorder(stream, {
+  //     mimeType: "video/webm; codecs=vp9",
+  //   });
+
+  //   recorder.ondataavailable = (e) => {
+  //     if (e.data.size > 0) recordedChunksRef.current.push(e.data);
+  //   };
+
+  //   recorder.onstop = () => {
+  //     const blob = new Blob(recordedChunksRef.current, {
+  //       type: "video/webm",
+  //     });
+
+  //     const url = URL.createObjectURL(blob);
+  //     setSessionVideoUrl(url);
+
+  //     const a = document.createElement("a");
+  //     a.click();
+
+  //     addLog("info", "Session recording saved and downloaded");
+  //   };
+
+  //   recorder.start();
+  //   recorderRef.current = recorder;
+  //   addLog("info", "Session recording started");
+  // };
+
   const startRecording = (stream: MediaStream) => {
-    recordedChunksRef.current = [];
+  recordedChunksRef.current = [];
 
-    const recorder = new MediaRecorder(stream, {
-      mimeType: "video/webm; codecs=vp9",
-    });
+  let mimeType = "";
 
-    recorder.ondataavailable = (e) => {
-      if (e.data.size > 0) recordedChunksRef.current.push(e.data);
-    };
+  if (MediaRecorder.isTypeSupported("video/webm; codecs=vp9")) {
+    mimeType = "video/webm; codecs=vp9"; // Chrome
+  } else if (MediaRecorder.isTypeSupported("video/webm; codecs=vp8")) {
+    mimeType = "video/webm; codecs=vp8"; // Firefox ✅
+  } else if (MediaRecorder.isTypeSupported("video/webm")) {
+    mimeType = "video/webm";
+  } else {
+    addLog("error", "No supported MediaRecorder codec found");
+    return;
+  }
 
-    recorder.onstop = () => {
-      const blob = new Blob(recordedChunksRef.current, {
-        type: "video/webm",
-      });
+  const recorder = new MediaRecorder(stream, { mimeType });
 
-      const url = URL.createObjectURL(blob);
-      setSessionVideoUrl(url);
-
-      const a = document.createElement("a");
-      a.click();
-
-      addLog("info", "Session recording saved and downloaded");
-    };
-
-    recorder.start();
-    recorderRef.current = recorder;
-    addLog("info", "Session recording started");
+  recorder.ondataavailable = (e) => {
+    if (e.data.size > 0) recordedChunksRef.current.push(e.data);
   };
+
+  recorder.onstop = () => {
+    const blob = new Blob(recordedChunksRef.current, { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    setSessionVideoUrl(url);
+    addLog("info", "Session recording saved");
+  };
+
+  recorder.start();
+  recorderRef.current = recorder;
+  addLog("info", `Recording started (${mimeType})`);
+};
+
+const enterFullscreen = () => {
+  if (!document.fullscreenElement) {
+    document.documentElement.requestFullscreen().catch(() => {
+      addLog("warning", "Fullscreen blocked by browser");
+      setFullscreenBlocked(true);
+    });
+  }
+};
+
+
 
   const stopRecording = () => {
     recorderRef.current?.stop();
@@ -353,17 +398,17 @@ export default function ProctorCamera() {
     // }
 
     if (isMobile) {
-      addLog("warning", "Screen sharing not supported on mobile browsers");
-    } else {
-      const screenStream = await requestScreenShare();
-      if (!screenStream) {
-        setIsRunning(false);
-        runningRef.current = false;
-        addLog("warning", "Exam not started. Screen sharing required.");
-        return;
-      }
-      startRecording(screenStream);
-    }
+  addLog("warning", "Screen sharing not supported on mobile browsers");
+} else {
+  const screenStream = await requestScreenShare();
+  if (!screenStream) {
+    setIsRunning(false);
+    runningRef.current = false;
+    addLog("warning", "Exam not started. Screen sharing required.");
+    return;
+  }
+  startRecording(screenStream);
+}
 
 
     // startRecording(screenStream);
@@ -378,28 +423,15 @@ export default function ProctorCamera() {
       addLog("warning", "Fullscreen request failed initially");
     });
 
-    addLog("info","Loading model....");
-
+    
     const landmarker = await loadFaceLandmarker();
     await loadObjectModel();
 
-    addLog("info", "Model Loaded")
-
-    
     let faceLostAlerted = false;
     let objectFrame = 0;
 
     const loop = async () => {
       if (!runningRef.current || !videoRef.current) return;
-      if (
-        !videoRef.current ||
-        videoRef.current.videoWidth === 0 ||
-        videoRef.current.videoHeight === 0 ||
-        videoRef.current.readyState < 2 // HAVE_CURRENT_DATA
-      ) {
-        requestAnimationFrame(loop);
-        return;
-      }
 
       const now = performance.now();
       const result = landmarker.detectForVideo(videoRef.current, now);
@@ -457,7 +489,7 @@ export default function ProctorCamera() {
       if (!runningRef.current) return;
       captureRandomShot();
     }, RANDOM_SHOT_COOLDOWN_MS);
-
+    enterFullscreen();
     loop();
   };
 
@@ -534,12 +566,13 @@ export default function ProctorCamera() {
               {logs.map((log, idx) => (
                 <div
                   key={idx}
-                  className={`mb-2 px-3 py-2 rounded text-sm font-medium ${log.type === "error"
-                    ? "bg-red-50 text-red-700 border border-red-200"
-                    : log.type === "warning"
-                      ? "bg-yellow-50 text-yellow-700 border border-yellow-200"
-                      : "bg-blue-50 text-blue-700 border border-blue-200"
-                    }`}
+                  className={`mb-2 px-3 py-2 rounded text-sm font-medium ${
+                    log.type === "error"
+                      ? "bg-red-50 text-red-700 border border-red-200"
+                      : log.type === "warning"
+                        ? "bg-yellow-50 text-yellow-700 border border-yellow-200"
+                        : "bg-blue-50 text-blue-700 border border-blue-200"
+                  }`}
                 >
                   [{log.time}] {log.message}
                 </div>
@@ -551,7 +584,11 @@ export default function ProctorCamera() {
         {/* Control Buttons */}
         <div className="flex gap-4 mb-8">
           <button
-            onClick={startProctoring}
+            // onClick={startProctoring}
+            onClick={() => {
+              // enterFullscreen();
+              startProctoring();
+            }}
             disabled={isRunning}
             className="px-6 py-3 bg-emerald-600 text-white font-semibold rounded-lg hover:bg-emerald-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
           >
