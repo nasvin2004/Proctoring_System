@@ -1,5 +1,7 @@
+
+
 import { useEffect, useRef } from "react";
-import { isIOSStandalonePWA } from "../utils/pwa";
+
 export type BrowserViolation = "fullscreen-exit" | "tab-switch";
 
 interface BrowserProctoringProps {
@@ -36,17 +38,11 @@ export function useBrowserProctoring({
     };
 
     /* ---------- FULLSCREEN EXIT ---------- */
-
-
     const onFullscreenChange = () => {
-      // ✅ iOS PWA has no real fullscreen — skip check
-      if (isIOSStandalonePWA()) return;
-
       if (fullScreenRequired && !document.fullscreenElement) {
         triggerOnce("fullscreen-exit");
       }
     };
-
 
     document.addEventListener("visibilitychange", onVisibilityChange);
     document.addEventListener("fullscreenchange", onFullscreenChange);
@@ -60,4 +56,3 @@ export function useBrowserProctoring({
     };
   }, [enabled, fullScreenRequired, onViolation]);
 }
-
