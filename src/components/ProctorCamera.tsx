@@ -6,6 +6,8 @@ import { detectGaze } from "../ml/gazeDetector";
 import { decideMalpractice } from "../ml/headDecision";
 import { loadObjectModel, detectObjects } from "../ml/objectDetector";
 import { useBrowserProctoring } from "../hooks/useBrowserProctoring";
+import { isIOSStandalonePWA } from "../utils/pwa";
+
 
 /* ---------------- TYPES ---------------- */
 type LogItem = {
@@ -70,11 +72,11 @@ export default function ProctorCamera() {
   const [screenshots, setScreenshots] = useState<ScreenshotItem[]>([]);
   const [cameraShots, setCameraShots] = useState<CameraShotItem[]>([]);
   const [logs, setLogs] = useState<LogItem[]>([]);
-  
+
   // New states for setup flow
   const [showSetupModal, setShowSetupModal] = useState(false);
   const [browserCompat, setBrowserCompat] = useState<BrowserCompatibility | null>(null);
-  
+
   // IMPORTANT: Reordered setup steps - Fullscreen is now LAST!
   const [setupSteps, setSetupSteps] = useState<SetupStep[]>([
     { id: "browser", label: "Browser Compatibility Check", completed: false },
@@ -92,19 +94,19 @@ export default function ProctorCamera() {
   const checkBrowserCompatibility = (): BrowserCompatibility => {
     const ua = navigator.userAgent;
     const issues: string[] = [];
-    
+
     // Detect OS
     const isLinux = /Linux|X11/i.test(ua);
     const isUbuntu = /Ubuntu/i.test(ua);
-    
+
     // Detect browser
     let browser = "Unknown";
     let needsUserGesture = false;
-    
+
     if (ua.includes("Chrome") && !ua.includes("Edg")) {
       browser = "Chrome";
       // Chrome on Linux/Ubuntu needs user gesture for fullscreen
-      needsUserGesture = isLinux || isUbuntu || isMobile;
+      needsUserGesture = isLinux || isUbuntu;
     } else if (ua.includes("Firefox")) {
       browser = "Firefox";
       needsUserGesture = true; // Firefox ALWAYS needs user gesture
@@ -113,10 +115,10 @@ export default function ProctorCamera() {
       needsUserGesture = true;
     } else if (ua.includes("Edg")) {
       browser = "Edge";
-      needsUserGesture = isLinux || isUbuntu || isMobile;
+      needsUserGesture = isLinux || isUbuntu;
     } else if (ua.includes("OPR") || ua.includes("Opera")) {
       browser = "Opera";
-      needsUserGesture = isLinux || isUbuntu || isMobile;
+      needsUserGesture = isLinux || isUbuntu;
     }
 
     // Check fullscreen API (check mozRequestFullScreen for Firefox first)
@@ -124,7 +126,6 @@ export default function ProctorCamera() {
       (document.documentElement as any).mozRequestFullScreen ||
       document.documentElement.requestFullscreen ||
       (document.documentElement as any).webkitRequestFullscreen ||
-      (document.documentElement as any).webkitEnterFullscreen || // Mobile Safari
       (document.documentElement as any).msRequestFullscreen
     );
 
@@ -137,7 +138,7 @@ export default function ProctorCamera() {
       navigator.mediaDevices?.getDisplayMedia
     );
 
-    if (!supportsScreenCapture && !isMobile) {
+    if (!supportsScreenCapture) {
       issues.push("Screen capture not supported");
     }
 
@@ -150,9 +151,14 @@ export default function ProctorCamera() {
       issues.push("Camera access not supported");
     }
 
-    const isCompatible = 
-      supportsFullscreen && 
-      supportsMediaDevices && 
+    // Mobile warnings
+    if (isMobile) {
+      issues.push("Screen sharing may not be available on mobile");
+    }
+
+    const isCompatible =
+      supportsFullscreen &&
+      supportsMediaDevices &&
       (isMobile || supportsScreenCapture);
 
     return {
@@ -166,6 +172,7 @@ export default function ProctorCamera() {
     };
   };
 
+  const requestFullscreenCompat = async (): Promise<boolean> => { try { const elem = document.documentElement; if (elem.requestFullscreen) { await elem.requestFullscreen(); } else if ((elem as any).webkitRequestFullscreen) { await (elem as any).webkitRequestFullscreen(); } else if ((elem as any).mozRequestFullScreen) { await (elem as any).mozRequestFullScreen(); } else if ((elem as any).msRequestFullscreen) { await (elem as any).msRequestFullscreen(); } else { throw new Error("Fullscreen not supported"); } return true; } catch (error) { console.error("Fullscreen error:", error); return false; } };
   /* ---------------- LOGGING ---------------- */
   const addLog = (type: LogItem["type"], message: string) => {
     setLogs((prev) => [
@@ -374,7 +381,7 @@ export default function ProctorCamera() {
       return stream;
     } catch (err: any) {
       console.error("Screen share error:", err);
-      
+
       // Different error types
       if (err.name === "NotAllowedError") {
         addLog("error", "Screen sharing permission denied");
@@ -383,7 +390,7 @@ export default function ProctorCamera() {
       } else {
         addLog("error", `Screen sharing error: ${err.message}`);
       }
-      
+
       return null;
     }
   };
@@ -416,7 +423,7 @@ export default function ProctorCamera() {
     recordedChunksRef.current = [];
 
     const mimeType = getSupportedMimeType();
-    
+
     // Firefox needs to ensure tracks are active before recording
     const videoTrack = stream.getVideoTracks()[0];
     if (!videoTrack || videoTrack.readyState !== "live") {
@@ -432,7 +439,7 @@ export default function ProctorCamera() {
       checkTrack();
       return;
     }
-    
+
     initializeRecorder(stream, mimeType);
   };
 
@@ -487,36 +494,27 @@ export default function ProctorCamera() {
   };
 
   /* ---------------- FULLSCREEN ---------------- */
-  const requestFullscreenSync = () => {
+  const reEnterFullscreen = () => {
     // FIREFOX REQUIREMENT: Sync call, no await!
     const elem = document.documentElement;
     let fullscreenPromise: Promise<void> | null = null;
-    
+
+
     // Call fullscreen synchronously
     try {
-      // Try different fullscreen APIs
       if ((elem as any).mozRequestFullScreen) {
         fullscreenPromise = (elem as any).mozRequestFullScreen();
       } else if (elem.requestFullscreen) {
         fullscreenPromise = elem.requestFullscreen();
       } else if ((elem as any).webkitRequestFullscreen) {
         fullscreenPromise = (elem as any).webkitRequestFullscreen();
-      } else if ((elem as any).webkitEnterFullscreen) {
-        // Mobile Safari
-        fullscreenPromise = (elem as any).webkitEnterFullscreen();
       } else if ((elem as any).msRequestFullscreen) {
         fullscreenPromise = (elem as any).msRequestFullscreen();
       }
     } catch (error) {
-      console.error("Fullscreen call error:", error);
+      console.error("Re-enter fullscreen error:", error);
     }
-    
-    return fullscreenPromise;
-  };
 
-  const reEnterFullscreen = () => {
-    const fullscreenPromise = requestFullscreenSync();
-    
     // Handle result asynchronously
     setTimeout(() => {
       if (fullscreenPromise) {
@@ -542,11 +540,11 @@ export default function ProctorCamera() {
     setSetupSteps((prev) =>
       prev.map((step) => ({ ...step, completed: false, error: undefined }))
     );
-    
+
     // Start with browser check
     const compat = checkBrowserCompatibility();
     setBrowserCompat(compat);
-    
+
     if (compat.isCompatible) {
       updateSetupStep("browser", true);
       addLog("info", `Browser compatible: ${compat.browser}`);
@@ -558,35 +556,23 @@ export default function ProctorCamera() {
 
   const runSetupStep = async (stepIndex: number) => {
     if (setupInProgress) return;
-    
+
     setSetupInProgress(true);
     setCurrentSetupStep(stepIndex);
-    
+
     const step = setupSteps[stepIndex];
-    
+
     // Clear any previous error for this step
     if (step.error) {
       updateSetupStep(step.id, false, undefined);
     }
-    
+
     try {
       switch (step.id) {
         case "browser":
-          // Re-check browser compatibility
-          const compat = checkBrowserCompatibility();
-          setBrowserCompat(compat);
-          
-          if (compat.isCompatible) {
-            updateSetupStep("browser", true);
-            addLog("info", `Browser compatible: ${compat.browser}`);
-          } else {
-            updateSetupStep("browser", false, compat.issues.join(", "));
-            addLog("error", `Browser compatibility issues: ${compat.issues.join(", ")}`);
-            setSetupInProgress(false);
-            return;
-          }
+          // Already done in startSetupFlow
           break;
-          
+
         case "camera":
           addLog("info", "Requesting camera access...");
           try {
@@ -603,10 +589,10 @@ export default function ProctorCamera() {
             updateSetupStep("camera", false, error.message);
             addLog("error", `Camera access failed: ${error.message}`);
             setSetupInProgress(false);
-            return;
+            return; // Stop here, allow retry
           }
           break;
-          
+
         case "screenshare":
           if (isMobile) {
             addLog("warning", "Screen sharing skipped (mobile device)");
@@ -626,18 +612,18 @@ export default function ProctorCamera() {
                 updateSetupStep("screenshare", false, "Screen sharing cancelled");
                 addLog("warning", "Screen sharing was cancelled. Please try again.");
                 setSetupInProgress(false);
-                return;
+                return; // Stop here, don't throw error
               }
             } catch (error: any) {
               // Handle screen share errors gracefully
               updateSetupStep("screenshare", false, error.message);
               addLog("error", `Screen sharing failed: ${error.message}`);
               setSetupInProgress(false);
-              return;
+              return; // Stop here, allow retry
             }
           }
           break;
-          
+
         case "models":
           addLog("info", "Loading AI models (this may take a moment)...");
           try {
@@ -649,51 +635,38 @@ export default function ProctorCamera() {
             updateSetupStep("models", false, error.message);
             addLog("error", `AI models loading failed: ${error.message}`);
             setSetupInProgress(false);
-            return;
+            return; // Stop here, allow retry
           }
           break;
-          
         case "fullscreen":
-          addLog("info", "Requesting fullscreen mode...");
-          if (browserCompat?.needsUserGesture) {
-            // Show button for user to click
-            addLog("info", "Please click the 'Enter Fullscreen' button");
-            setSetupInProgress(false);
-            return;
+          // ✅ iOS PWA: fullscreen API NOT supported
+          if (isIOSStandalonePWA()) {
+            updateSetupStep("fullscreen", true);
+            addLog("info", "iOS PWA detected – fullscreen handled by standalone mode");
+            tabSwitchGraceUntilRef.current = Date.now() + 1000;
+            break;
+          }
+
+          // 🔁 ALL OTHER BROWSERS (OLD LOGIC – UNCHANGED)
+          const fsSuccess = await requestFullscreenCompat();
+          if (fsSuccess) {
+            updateSetupStep("fullscreen", true);
+            addLog("info", "Fullscreen mode activated");
+            tabSwitchGraceUntilRef.current = Date.now() + 1000;
           } else {
-            // Auto-trigger for Chrome on Windows/Mac
-            const fullscreenPromise = requestFullscreenSync();
-            
-            if (fullscreenPromise) {
-              fullscreenPromise
-                .then(() => {
-                  updateSetupStep("fullscreen", true);
-                  addLog("info", "Fullscreen mode activated");
-                  tabSwitchGraceUntilRef.current = Date.now() + 1000;
-                  setSetupInProgress(false);
-                })
-                .catch((error) => {
-                  console.error("Auto fullscreen failed:", error);
-                  updateSetupStep("fullscreen", false, "Click button to enter fullscreen");
-                  addLog("warning", "Auto fullscreen failed, please use the button");
-                  setSetupInProgress(false);
-                  return;
-                });
-              return; // Don't set setupInProgress to false yet
-            } else {
-              updateSetupStep("fullscreen", false, "Click button to enter fullscreen");
-              addLog("warning", "Fullscreen API not available, please use the button");
-              setSetupInProgress(false);
-              return;
-            }
+            throw new Error("Fullscreen request failed");
           }
           break;
+
       }
-      
+
       setSetupInProgress(false);
-      
+
       // Auto-advance to next step if not fullscreen with user gesture needed
-      if (stepIndex < setupSteps.length - 1) {
+      if (
+        stepIndex < setupSteps.length - 1 &&
+        !(step.id === "fullscreen" && browserCompat?.needsUserGesture)
+      ) {
         setTimeout(() => runSetupStep(stepIndex + 1), 500);
       }
     } catch (error: any) {
@@ -704,50 +677,17 @@ export default function ProctorCamera() {
     }
   };
 
-  const handleFullscreenButtonClick = () => {
-    // CRITICAL FOR FIREFOX: Sync call, no async operations before!
-    const fullscreenPromise = requestFullscreenSync();
-    
-    // Handle result asynchronously
-    setTimeout(() => {
-      if (fullscreenPromise) {
-        fullscreenPromise
-          .then(() => {
-            updateSetupStep("fullscreen", true);
-            addLog("info", "Fullscreen mode activated");
-            tabSwitchGraceUntilRef.current = Date.now() + 1000;
-            setSetupInProgress(false);
-            
-            // Continue to next step if any
-            const currentIndex = setupSteps.findIndex((s) => s.id === "fullscreen");
-            if (currentIndex < setupSteps.length - 1) {
-              setTimeout(() => runSetupStep(currentIndex + 1), 500);
-            }
-          })
-          .catch((error) => {
-            console.error("Fullscreen button click failed:", error);
-            updateSetupStep("fullscreen", false, "Fullscreen request denied");
-            addLog("error", "Fullscreen request denied");
-            setSetupInProgress(false);
-          });
-      } else {
-        updateSetupStep("fullscreen", false, "Fullscreen API not available");
-        addLog("error", "Fullscreen API not available");
-        setSetupInProgress(false);
-      }
-    }, 0);
-  };
 
   const completeSetup = async () => {
     setShowSetupModal(false);
     setIsRunning(true);
     runningRef.current = true;
-    
+
     addLog("info", "Proctoring started - Test in progress");
-    
+
     // Load landmarker again to ensure it's ready
     const landmarker = await loadFaceLandmarker();
-    
+
     let faceLostAlerted = false;
     let objectFrame = 0;
 
@@ -817,12 +757,12 @@ export default function ProctorCamera() {
   /* ---------------- START PROCTORING (TRIGGERS SETUP) ---------------- */
   const startProctoring = () => {
     if (runningRef.current) return;
-    
+
     setLogs([]);
     setScreenshots([]);
     setCameraShots([]);
     setSessionVideoUrl(null);
-    
+
     startSetupFlow();
   };
 
@@ -899,13 +839,12 @@ export default function ProctorCamera() {
               {logs.map((log, idx) => (
                 <div
                   key={idx}
-                  className={`mb-2 px-3 py-2 rounded text-sm font-medium ${
-                    log.type === "error"
+                  className={`mb-2 px-3 py-2 rounded text-sm font-medium ${log.type === "error"
                       ? "bg-red-50 text-red-700 border border-red-200"
                       : log.type === "warning"
-                      ? "bg-yellow-50 text-yellow-700 border border-yellow-200"
-                      : "bg-blue-50 text-blue-700 border border-blue-200"
-                  }`}
+                        ? "bg-yellow-50 text-yellow-700 border border-yellow-200"
+                        : "bg-blue-50 text-blue-700 border border-blue-200"
+                    }`}
                 >
                   [{log.time}] {log.message}
                 </div>
@@ -1128,7 +1067,6 @@ export default function ProctorCamera() {
                 <p className="text-sm text-orange-600 mt-1">
                   {browserCompat.browser === "Firefox" && "🦊 "}
                   {/Linux|Ubuntu/i.test(navigator.userAgent) && "🐧 "}
-                  {isMobile && "📱 "}
                   You'll need to click "Enter Fullscreen" button when ready
                 </p>
               )}
@@ -1136,18 +1074,17 @@ export default function ProctorCamera() {
 
             {/* Browser Compatibility Info */}
             {browserCompat && (
-              <div className={`mb-6 p-4 rounded-lg border ${
-                browserCompat.isCompatible
+              <div className={`mb-6 p-4 rounded-lg border ${browserCompat.isCompatible
                   ? "bg-green-50 border-green-200"
                   : "bg-red-50 border-red-200"
-              }`}>
+                }`}>
                 <div className="flex items-center mb-2">
                   <span className="text-2xl mr-3">
                     {browserCompat.isCompatible ? "✅" : "❌"}
                   </span>
                   <div>
                     <p className="font-semibold text-gray-900">
-                      Browser: {browserCompat.browser} {isMobile && "(Mobile)"}
+                      Browser: {browserCompat.browser}
                     </p>
                     <p className="text-sm text-gray-600">
                       {browserCompat.needsUserGesture
@@ -1176,28 +1113,27 @@ export default function ProctorCamera() {
               {setupSteps.map((step, idx) => (
                 <div
                   key={step.id}
-                  className={`p-4 rounded-lg border ${
-                    step.completed
+                  className={`p-4 rounded-lg border ${step.completed
                       ? "bg-green-50 border-green-200"
                       : step.error
-                      ? "bg-red-50 border-red-200"
-                      : idx === currentSetupStep
-                      ? "bg-blue-50 border-blue-200"
-                      : "bg-gray-50 border-gray-200"
-                  }`}
+                        ? "bg-red-50 border-red-200"
+                        : idx === currentSetupStep
+                          ? "bg-blue-50 border-blue-200"
+                          : "bg-gray-50 border-gray-200"
+                    }`}
                 >
                   <div className="flex items-center justify-between">
-                    <div className="flex items-center flex-1">
+                    <div className="flex items-center">
                       <span className="text-2xl mr-3">
                         {step.completed
                           ? "✅"
                           : step.error
-                          ? "❌"
-                          : idx === currentSetupStep
-                          ? "🔄"
-                          : "⏳"}
+                            ? "❌"
+                            : idx === currentSetupStep
+                              ? "🔄"
+                              : "⏳"}
                       </span>
-                      <div className="flex-1">
+                      <div>
                         <p className="font-semibold text-gray-900">
                           {idx + 1}. {step.label}
                         </p>
@@ -1206,42 +1142,6 @@ export default function ProctorCamera() {
                         )}
                       </div>
                     </div>
-                    
-                    {/* Show fullscreen button when on fullscreen step and needs user gesture OR has error */}
-                    {step.id === "fullscreen" &&
-                      idx === currentSetupStep &&
-                      !step.completed &&
-                      (browserCompat?.needsUserGesture || step.error) && (
-                        <button
-                          onClick={handleFullscreenButtonClick}
-                          disabled={setupInProgress}
-                          className="ml-3 px-4 py-2 bg-blue-600 text-white font-semibold rounded hover:bg-blue-700 disabled:bg-gray-400 transition-colors whitespace-nowrap"
-                        >
-                          Enter Fullscreen
-                        </button>
-                      )}
-                    
-                    {/* Show retry button for failed non-fullscreen steps */}
-                    {step.error && step.id !== "fullscreen" && idx === currentSetupStep && (
-                      <button
-                        onClick={() => runSetupStep(idx)}
-                        disabled={setupInProgress}
-                        className="ml-3 px-4 py-2 bg-orange-600 text-white font-semibold rounded hover:bg-orange-700 disabled:bg-gray-400 transition-colors whitespace-nowrap"
-                      >
-                        🔄 Retry
-                      </button>
-                    )}
-                    
-                    {/* Show retry button for completed browser check (allow re-checking) */}
-                    {step.id === "browser" && step.completed && idx === currentSetupStep && (
-                      <button
-                        onClick={() => runSetupStep(idx)}
-                        disabled={setupInProgress}
-                        className="ml-3 px-4 py-2 bg-gray-500 text-white font-semibold rounded hover:bg-gray-600 disabled:bg-gray-400 transition-colors whitespace-nowrap text-sm"
-                      >
-                        Re-check
-                      </button>
-                    )}
                   </div>
                 </div>
               ))}
@@ -1258,7 +1158,7 @@ export default function ProctorCamera() {
                   Begin Setup
                 </button>
               )}
-              
+
               {allStepsCompleted && (
                 <button
                   onClick={completeSetup}
@@ -1267,7 +1167,7 @@ export default function ProctorCamera() {
                   🚀 Start Test
                 </button>
               )}
-              
+
               <button
                 onClick={() => {
                   setShowSetupModal(false);
@@ -1309,3 +1209,10 @@ export default function ProctorCamera() {
     </div>
   );
 }
+
+
+
+
+
+
+
