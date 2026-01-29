@@ -24,7 +24,7 @@ export async function detectObjects(
 ): Promise<string[]> {
   if (!model) await loadObjectModel();
 
-  const predictions = await model!.detect(video);
+  const predictions = await model!.detect(video,10);
 
   return predictions
     .filter(
