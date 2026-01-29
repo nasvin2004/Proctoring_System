@@ -8,13 +8,15 @@ let faceLandmarker: FaceLandmarker | null = null;
 export async function loadFaceLandmarker() {
   if (faceLandmarker) return faceLandmarker;
 
-  const vision = await FilesetResolver.forVisionTasks(
-    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/wasm"
-  );
+  // ✅ Load MediaPipe WASM from LOCAL files (not CDN)
+  const vision = await FilesetResolver.forVisionTasks("/mediapipe");
 
   faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
     baseOptions: {
-      modelAssetPath: "/models/face_landmarker.task",
+      // ✅ Load model from local public folder
+      modelAssetPath: "/mediapipe/face_landmarker.task",
+
+      // ✅ GPU when available, auto-fallback to CPU
       delegate: "GPU",
     },
     runningMode: "VIDEO",
